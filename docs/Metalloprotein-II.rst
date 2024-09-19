@@ -429,12 +429,13 @@ There are several caveats associated with this approach:
 
 
 ###########################################################
-4. Classical MD simulation
+4. Classical MD simulation with constraints
 ###########################################################
 
 Defining list of lists of bond-constraints, angle-restaints, and dihedral-restraints for the 2Fe-2S cluster with surrounding Cys residues:
 
 .. code-block:: python
+
     # constraints within the same cluster, upper trianglular matrix
     FES1 = [x - 2 for x in [2695, 2696, 2697, 2698]]  # 2 ter atoms before FES1
     FES2 = [x - 3 for x in [2700, 2701, 2702, 2703]]  # 3 ter atoms before FES2
@@ -506,6 +507,12 @@ Production MD. To redefine the bond-constraints, angle-restraints, and dihedral-
     #Re-image trajectory so that protein is in middle
     MDtraj_imagetraj("NVTtrajectory.dcd", "NVTtrajectory_lastframe.pdb", format='DCD')
 
+
+
+###########################################################
+5. Analysis and clustering of MM trajectory
+###########################################################
+
 Visualize the trajectory and analyze the RMSD, RMSF:
 
 .. code-block:: python
@@ -551,6 +558,7 @@ Visualize the trajectory and analyze the RMSD, RMSF:
         plt.axvline(x=i, color='r', linestyle='--')
     plt.axvline(x=FE, color='g', linestyle='--')
 
+
 Check whether the bond-lengths, angles, and dihedrals of the [2Fe-2S] cluster are constrained/restrained as intended:
 
 .. code-block:: python
@@ -573,13 +581,31 @@ Check whether the bond-lengths, angles, and dihedrals of the [2Fe-2S] cluster ar
     plt.xlabel('Time (ps)')
     plt.ylabel('Dihedrals (rad)')
 
+.. image:: figures/ferredoxin-MM_rmsd.png
+   :align: left
+   :width: 400
+
+.. image:: figures/ferredoxin-MM_rmsf.png
+    :align: left
+    :width: 400
+
+.. image:: figures/ferredoxin-MM_bond_constraints.png
+   :align: left
+   :width: 400
+
+.. image:: figures/ferredoxin-MM_angle_restraints.png
+   :align: left
+   :width: 400
+
+
+
+
 To identify diverse and uncorrelated structures for QM/MM calculations, we first applied time-lagged independent component analysis (TICA) to reduces the dimensionality of the trajectory data and capture the slowest collective motions in the protein.
 Next, we performed k-means clustering to assign trajectory frames to different conformational states in this reduced space. From the resulting clusters, we built a Bayesian Markov state model (MSM), which identifies metastable states and the transition probabilities between these states, giving us insight into the kinetic landscape of the system.
-Finally, to extract representative structures from the metastable states, we used Perron Cluster Cluster Analysis (PCCA).
-
-You can find more detailed examples of this workflow in the `Pyemma tutorial <http://www.emma-project.org/latest/tutorials/notebooks/00-pentapeptide-showcase.html>`
+Finally, to extract representative structures from the metastable states, we used Perron Cluster Cluster Analysis (PCCA). You can find more detailed examples of this workflow in the `Pyemma tutorial <http://www.emma-project.org/latest/tutorials/notebooks/00-pentapeptide-showcase.html>`_
 
 .. code-block:: python
+    
     import numpy as np
     np.bool = np.bool_ # hack to fix a bug in pyemma numpy compatibility
     import pyemma
@@ -616,17 +642,20 @@ You can find more detailed examples of this workflow in the `Pyemma tutorial <ht
         outfiles=['./mm_data/pcca{}_10samples.pdb'.format(n + 1)
                 for n in range(msm.n_metastable)])
 
-
+.. image:: figures/ferredoxin-MM_tica.png
+   :align: center
+   :width: 300
 
 
 ###########################################################
-5. QM/MM calculations
+5. QM/MM with broken-symmetry DFT using ORCA
 ###########################################################
 
 Although we include both chains in the classical MD simulation, we will only include one chain in the QM/MM calculations.
-First, we define a minimal QM region as the [2Fe-2S] cluster and the sidechain of surrounding Cys residues
+First, we define a minimal QM region as the [2Fe-2S] cluster and the sidechain of surrounding Cys residues, following :doc:`QM-MM-boundary_tutorial`.
 
-.. code-block::python
+.. code-block:: python
+
     import pytraj as pt
     qm_regions = ':38,43,46,76@CB,HB2,HB3,SG,:96'
     traj = pt.load(f'mm_data/pcca{i}_10samples.pdb', frame_indices=[0])
@@ -642,9 +671,10 @@ First, we define a minimal QM region as the [2Fe-2S] cluster and the sidechain o
         f.write(' '.join(str(x) for x in qm))
 
 Next, we create a QM/MM object, with orca as the QM theory and OpenMM as the MM theory. The [2Fe-2S] cluster is treated with broken-symmetry DFT with highest
-multiplicity of 11 `HSmult`, and one of the Fe ions is flipped `atomstoflip`, since two Fe ions are equivalent in the cluster.
+multiplicity of 11 ``HSmult``, and one of the Fe ions is flipped ``atomstoflip``, since two Fe ions are equivalent in the cluster.
 We first test the QM/MM setup with a single-point calculation:
-.. code-block::python
+
+.. code-block:: python
 
     from ash import Fragment, ORCATheory, OpenMMTheory, QMMMTheory, Singlepoint
 
@@ -660,8 +690,28 @@ We first test the QM/MM setup with a single-point calculation:
     # Single-point job to test QM/MM setup
     Singlepoint(theory=qmmm, fragment=frag, charge=2, mult=1)
 
+BS-DFT explores mixed-spin configurations by starting from a high-spin state and flipping the spin of one atom.
+It allows different metals can have different spin states, and the spins on neighboring metal centers are aligned antiparallel.
+During the scf, we might encounter `negative HOMO - LUMO gap` warning and the final results shows `Small HOMO/LUMO gap`, which is consistent with the system's near-degenerate orbitals.
+Below is the broken symmetry analysis from Orca output.
+
+.. code-block:: text
+
+    ------------------------------------------
+    BROKEN SYMMETRY MAGNETIC COUPLING ANALYSIS
+    ------------------------------------------
+    
+    S(High-Spin)      =   5.0    
+    <S**2>(High-Spin) =  30.7544    
+    <S**2>(BrokenSym) =   4.7999    
+    E(High-Spin)      = -5114.864637 Eh
+    E(BrokenSym)      = -5114.874163 Eh
+    E(High-Spin)-E(BrokenSym)= 0.2592 eV   2090.431 cm**-1 (ANTIFERROMAGNETIC coupling)
+
 Then, we perform QM/MM MD simulation and geometry optimization:
-.. code-block::python
+
+.. code-block:: python
+
     OpenMM_MD(fragment=frag, theory=qmmm, timestep=0.001, simulation_time=0.1, traj_frequency=1, temperature=300,
         integrator='LangevinMiddleIntegrator', trajfilename="QM_MM", coupling_frequency=1, charge=2, mult=1)
 
@@ -678,3 +728,4 @@ Then, we perform QM/MM MD simulation and geometry optimization:
     actatoms=list(qmatomlist)
     Optimizer(fragment=frag, theory=qmmm, ActiveRegion=True, actatoms=actatoms, maxiter=200,
         charge=2, mult=1)
+
