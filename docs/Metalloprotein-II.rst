@@ -432,4 +432,249 @@ There are several caveats associated with this approach:
 4. Classical MD simulation
 ###########################################################
 
-TO BE DONE...
+Defining list of lists of bond-constraints, angle-restaints, and dihedral-restraints for the 2Fe-2S cluster with surrounding Cys residues:
+
+.. code-block:: python
+    # constraints within the same cluster, upper trianglular matrix
+    FES1 = [x - 2 for x in [2695, 2696, 2697, 2698]]  # 2 ter atoms before FES1
+    FES2 = [x - 3 for x in [2700, 2701, 2702, 2703]]  # 3 ter atoms before FES2
+    CYSS1 = [559, 620, 652, 1058]
+    CYSS2 = [x - 1 for x in [1906, 1967, 1999, 2405]]  # 1 ter atom before CYSS2
+
+    # adjust for atom index starting at 0
+    FES1 = [x - 1 for x in FES1]
+    FES2 = [x - 1 for x in FES2]
+    CYSS1 = [x - 1 for x in CYSS1]
+    CYSS2 = [x - 1 for x in CYSS2]
+
+    # bond constraints between FES's Fe and CYS's SG
+    FES_BONDS = [(x, y) for x in FES1[:2] for y in FES1[2:]] + [(x, y) for x in FES2[:2] for y in FES2[2:]]
+    FES_CYS_Links = [(FES1[0],y) for y in CYSS1[:2]] + [(FES1[1],y) for y in CYSS1[2:]] + [(FES2[0],y) for y in CYSS2[:2]] + [(FES2[1],y) for y in CYSS2[2:]]
+    bondconstraints = FES_BONDS + FES_CYS_Links
+    # check for duplicates
+    bondconstraints = list(set(bondconstraints))
+
+    # angle restraints within the cluster
+    anglerestraints = [(FES1[0], FES1[1], FES1[2]), (FES1[1], FES1[2], FES1[3]),
+                        (FES2[0], FES2[1], FES2[2]), (FES2[1], FES2[2], FES2[3])]
+
+    # dihedral restraints within the cluster and between the cluster and CYS
+    dihedralrestraints = [tuple(l[i]  for i in [0,2,1,3]) for l in [FES1, FES2]] 
+    dihedralrestraints = dihedralrestraints + [(CYSS1[0], FES1[2], FES1[3], CYSS1[1]), 
+                        (CYSS1[1], FES1[2], FES1[3], CYSS1[2]),
+                        (CYSS2[0], FES2[2], FES2[3], CYSS2[1]),
+                        (CYSS2[1], FES2[2], FES2[3], CYSS2[2])]
+
+
+    #Creating new OpenMM object with constraints and restraints
+    omm = OpenMMTheory(xmlfiles=["charmm36.xml", "charmm36/water.xml", "setups/FES-mod.xml"], pdbfile="setups/finalsystem.pdb", periodic=True,
+                numcores=numcores, platform="CUDA", autoconstraints='HBonds', rigidwater=True,
+                bondconstraints=bondconstraints, anglerestraints=anglerestraints, dihedralrestraints = dihedralrestraints,
+                angleforceconstant=500.0, dihedralforceconstant=250.0)
+
+Minimize, gental warming, and equilibration:
+
+.. code-block:: python
+
+    #Minimization
+    OpenMM_Opt(fragment=fragment, theory=omm, maxiter=100, tolerance=1, printlevel=2)
+
+    #Gentle heating
+    Gentle_warm_up_MD(fragment=fragment, theory=omm, time_steps=[0.0005,0.001,0.002, 0.002],
+                steps=[10,50,100,700], temperatures=[1,10,100,300])
+
+    #Equilibration
+    OpenMM_box_equilibration(fragment=fragment, theory=omm, datafilename="nptsim.csv", numsteps_per_NPT=50000,max_NPT_cycles=5,
+                      volume_threshold=1.0, density_threshold=0.002, temperature=300, timestep=0.002,
+                      traj_frequency=1000, trajfilename='relaxbox_NPT', trajectory_file_option='DCD', coupling_frequency=1)
+
+Production MD. To redefine the bond-constraints, angle-restraints, and dihedral-restraints, we can recreate the OpenMM object from the last frame of the equilibration trajectory:
+
+.. code-block:: python
+
+    eq_pdb = "relaxbox_NPT_lastframe_imaged.pdb"
+    fragment=Fragment(pdbfile=eq_pdb)
+    #Creating new OpenMM object
+    omm = OpenMMTheory(xmlfiles=["charmm36.xml", "charmm36/water.xml", "setups/FES-mod.xml"], pdbfile=eq_pdb,
+                periodic=True,  numcores=4, platform="CUDA", autoconstraints='HBonds', rigidwater=True,
+                bondconstraints=bondconstraints, anglerestraints=anglerestraints, dihedralrestraints = dihedralrestraints,
+                angleforceconstant=250.0, dihedralforceconstant=100.0)
+    #Production MD
+    OpenMM_MD(fragment=fragment, theory=omm, timestep=0.002, simulation_time=10000, traj_frequency=1000, temperature=300,
+            integrator='LangevinMiddleIntegrator', coupling_frequency=1, trajfilename='NVTtrajectory',trajectory_file_option='DCD',
+            datafilename="nvtsim.csv")
+    #Re-image trajectory so that protein is in middle
+    MDtraj_imagetraj("NVTtrajectory.dcd", "NVTtrajectory_lastframe.pdb", format='DCD')
+
+Visualize the trajectory and analyze the RMSD, RMSF:
+
+.. code-block:: python
+
+    import py3Dmol
+    view = py3Dmol.view(width=800,height=400)
+    view.addModel(open("inputs/6lk1.pdb").read(),'pdb')
+    view.addModel(open("NVTtrajectory_lastframe_imaged.pdb").read(),'pdb')
+    view.setStyle({'model':0},{'cartoon': {'color':'silver'}})
+    view.setStyle({'model':1},{'cartoon': {'color':'red'}})
+    view.setStyle({'resn':'FES'},{'stick':{'color':'spectrum'}})
+    view.zoomTo()
+
+    import mdtraj as md
+    import numpy as np
+    import matplotlib.pyplot as plt
+    md_traj = md.load("mm_data/NVTtrajectory_imaged.dcd", top="mm_data/NVTtrajectory_lastframe.pdb")
+    protein = md_traj.top.select("protein or resname FES")
+    protein_traj = md_traj.atom_slice(protein)
+    rmsd = md.rmsd(protein_traj, protein_traj, 0) # backbone or not
+    x = np.arange(0, len(rmsd)) * 0.002 * 1000 # in ps
+    plt.plot(x, rmsd)
+    plt.xlabel('Time (ps)')
+    plt.ylabel('RMSD (nm)')
+    protein_traj.save_dcd("mm_data/NVTtrajectory_imaged_protein.dcd")
+    protein_traj[-1].save_pdb("mm_data/NVTtrajectory_imaged_protein.pdb")
+
+    import pytraj as pt
+    pt_traj = pt.load("mm_data/NVTtrajectory_imaged_protein.dcd", top="mm_data/NVTtrajectory_imaged_protein.pdb")
+    rmsf = pt.rmsf(pt_traj, 'byres')
+    rmsf = [x[1] for x in rmsf] # only RMSF values
+    plt.plot(rmsf)
+    plt.xlabel('Residue')
+    plt.ylabel('RMSF (nm)') 
+
+    CYS1 = [38, 43, 46, 76]
+    CYS2 = [x + 95 for x in CYS1]
+    FE = 95*2
+    # highlight the metal cluster and the CYS residues
+    for i in CYS1:
+        plt.axvline(x=i, color='b', linestyle='--')
+    for i in CYS2:
+        plt.axvline(x=i, color='r', linestyle='--')
+    plt.axvline(x=FE, color='g', linestyle='--')
+
+Check whether the bond-lengths, angles, and dihedrals of the [2Fe-2S] cluster are constrained/restrained as intended:
+
+.. code-block:: python
+
+    angles = md.compute_angles(md_traj, anglerestraints)
+    # color by the angle
+    for i in range(4):
+        plt.plot(angles[:, i], label=f'angle {anglerestraints[i]}')
+    plt.legend()
+    plt.xlabel('Time (ps)')
+    plt.ylabel('Angles (rad)')
+
+    distance = md.compute_distances(protein_traj, bondconstraints)
+    plt.plot(x, distance)
+    plt.xlabel('Time (ps)')
+    plt.ylabel('Distance (A)')
+
+    angles = md.compute_dihedrals(protein_traj, dihedralrestraints)
+    plt.plot(x, angles)
+    plt.xlabel('Time (ps)')
+    plt.ylabel('Dihedrals (rad)')
+
+To identify diverse and uncorrelated structures for QM/MM calculations, we first applied time-lagged independent component analysis (TICA) to reduces the dimensionality of the trajectory data and capture the slowest collective motions in the protein.
+Next, we performed k-means clustering to assign trajectory frames to different conformational states in this reduced space. From the resulting clusters, we built a Bayesian Markov state model (MSM), which identifies metastable states and the transition probabilities between these states, giving us insight into the kinetic landscape of the system.
+Finally, to extract representative structures from the metastable states, we used Perron Cluster Cluster Analysis (PCCA).
+
+You can find more detailed examples of this workflow in the `Pyemma tutorial <http://www.emma-project.org/latest/tutorials/notebooks/00-pentapeptide-showcase.html>`
+
+.. code-block:: python
+    import numpy as np
+    np.bool = np.bool_ # hack to fix a bug in pyemma numpy compatibility
+    import pyemma
+    pdb = "NVTtrajectory_imaged_protein.pdb"
+
+    # load and featurize the trajectory with distance between the Fe ion and all heavy atoms
+    feat = pyemma.coordinates.featurizer(pdb)
+    fe1_selection = feat.select('name FE1 and resname FES')
+    heavy_selection = feat.select_Heavy()
+    atom_pairs = [(i, j) for i in fe1_selection for j in heavy_selection]
+    feat.add_distances(atom_pairs)
+    md_traj = pyemma.coordinates.load("NVTtrajectory_imaged_protein.dcd", features=feat)
+
+    # TICA
+    tica = pyemma.coordinates.tica(md_traj, lag=5) #decorrelated traj
+    tica_output = tica.get_output()
+
+    # k-means clustering
+    cluster = pyemma.coordinates.cluster_kmeans(
+    tica_output, k=75, max_iter=50, stride=10, fixed_seed=1)
+
+    # MSM
+    msm = pyemma.msm.bayesian_markov_model(cluster.dtrajs, lag=5, dt_traj='0.1 ns')
+
+    # PCCA
+    msm.pcca(5) # 5 metastable states
+    pcca_samples = msm.sample_by_distributions(msm.metastable_distributions, 10)
+
+    # save representative structures
+    source = pyemma.coordinates.source("NVTtrajectory_imaged_protein.dcd", features=feat)
+    pyemma.coordinates.save_trajs(
+        source,
+        pcca_samples,
+        outfiles=['./mm_data/pcca{}_10samples.pdb'.format(n + 1)
+                for n in range(msm.n_metastable)])
+
+
+
+
+###########################################################
+5. QM/MM calculations
+###########################################################
+
+Although we include both chains in the classical MD simulation, we will only include one chain in the QM/MM calculations.
+First, we define a minimal QM region as the [2Fe-2S] cluster and the sidechain of surrounding Cys residues
+
+.. code-block::python
+    import pytraj as pt
+    qm_regions = ':38,43,46,76@CB,HB2,HB3,SG,:96'
+    traj = pt.load(f'mm_data/pcca{i}_10samples.pdb', frame_indices=[0])
+    traj = traj[':1-95,191'] # chain A
+    traj.save(f'mm_data/mm{i}.pdb', overwrite=True)
+    traj = pt.load(f'mm_data/mm{i}.pdb')
+    top = traj.top
+    top.set_reference(traj[0])
+    qm = top.select(qm_regions)
+    traj = traj[qm_regions]
+    traj.save(f'mm_data/qm{i}.pdb', overwrite=True)
+    with open('mm_data/qm.txt', 'w') as f:
+        f.write(' '.join(str(x) for x in qm))
+
+Next, we create a QM/MM object, with orca as the QM theory and OpenMM as the MM theory. The [2Fe-2S] cluster is treated with broken-symmetry DFT with highest
+multiplicity of 11 `HSmult`, and one of the Fe ions is flipped `atomstoflip`, since two Fe ions are equivalent in the cluster.
+We first test the QM/MM setup with a single-point calculation:
+.. code-block::python
+
+    from ash import Fragment, ORCATheory, OpenMMTheory, QMMMTheory, Singlepoint
+
+    frag=Fragment(pdbfile="mm_data/mm1.pdb")
+    qmatomlist = read_intlist_from_file("mm_data/qm1.txt")
+
+    orcatheory=ORCATheory(orcasimpleinput="! UKS r2scan ZORA ZORA-def2-TZVP tightscf CPCM", numcores=8,
+        brokensym=True, HSmult=11, atomstoflip=[1346], orcadir="../orca_600")
+    omm = OpenMMTheory(xmlfiles=["charmm36.xml", "charmm36/water.xml", "setups/FES-mod.xml"], pdbfile="mm_data/mm1.pdb",
+            periodic=True, platform="CUDA", numcores=4, autoconstraints=None, rigidwater=False)
+    qmmm = QMMMTheory(qm_theory=orcatheory, mm_theory=omm, fragment=frag,
+                qmatoms=qmatomlist)
+    # Single-point job to test QM/MM setup
+    Singlepoint(theory=qmmm, fragment=frag, charge=2, mult=1)
+
+Then, we perform QM/MM MD simulation and geometry optimization:
+.. code-block::python
+    OpenMM_MD(fragment=frag, theory=qmmm, timestep=0.001, simulation_time=0.1, traj_frequency=1, temperature=300,
+        integrator='LangevinMiddleIntegrator', trajfilename="QM_MM", coupling_frequency=1, charge=2, mult=1)
+
+    frag=Fragment(pdbfile="QM_MM_lastframe.pdb")
+    qmatomlist = read_intlist_from_file("mm_data/qm1.txt")
+
+    orcatheory=ORCATheory(orcasimpleinput="! UKS r2scan ZORA ZORA-def2-TZVP tightscf CPCM", numcores=8,
+        brokensym=True, HSmult=11, atomstoflip=[1346], orcadir="../orca_600")
+    omm = OpenMMTheory(xmlfiles=["charmm36.xml", "charmm36/water.xml", "setups/FES-mod.xml"], pdbfile="QM_MM_lastframe.pdb",
+            periodic=True, platform="CUDA", numcores=4, autoconstraints=None, rigidwater=False)
+    qmmm = QMMMTheory(qm_theory=orcatheory, mm_theory=omm, fragment=frag,
+                qmatoms=qmatomlist)
+
+    actatoms=list(qmatomlist)
+    Optimizer(fragment=frag, theory=qmmm, ActiveRegion=True, actatoms=actatoms, maxiter=200,
+        charge=2, mult=1)
